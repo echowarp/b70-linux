@@ -15,6 +15,7 @@ EXPERIMENTAL: on our board (ASRock Arc Pro B70 Creator) any rate above
 stock (20000 Mbps tried, at probe and live) hangs GT0 forcewake about
 50-600 ms after the write. We run with it disabled (param unset).
 
+Signed-off-by: Evan Boldt <evan.d.boldt@gmail.com>
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  drivers/gpu/drm/xe/xe_device.c |  5 +++

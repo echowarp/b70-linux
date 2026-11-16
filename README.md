@@ -23,7 +23,10 @@ clock. Treat the numbers as one board's results, not a specification.
 | `patches/0005-...` | drm/xe: debugfs for the Battlemage pcode overclocking domains (`dri/<pci>/oc/{domains,power_limit,write,exit}`) |
 | `patches/0006-...` | **EXPERIMENTAL**: module param `xe.oc_mem_mbps` sets the GDDR rate at probe. Unstable on our board (GT0 forcewake hang right after any rate above stock); we run with it disabled |
 | `docs/monitoring.md` | Which telemetry readers keep the GT out of RC6, idle-power numbers, ASPM warning, the stale-temperature fan latch and a userspace workaround |
-| `tools/` | Userspace helpers (placeholders for now, see `tools/*/README.md`) |
+| `tools/b70-fan-refresh/` | Script + systemd unit: userspace workaround for the stale-temperature fan latch (IGCIT #1574), no kernel patch |
+| `tools/b70-fan-smooth/` | Optional calmer fan curve (script + unit); needs Intel's xe fan-control series 168027 |
+| `tools/b70-powerd/` | Root daemon: power limit via `oc/power_limit`, VRAM guard, re-apply after reset, plus both fan functions |
+| `tools/xe-oc-build.sh` | Builds a patched `xe.ko` (0004 + 0005) for the running Ubuntu kernel from Ubuntu's source package |
 
 ### Base kernel
 
@@ -109,8 +112,15 @@ echo 2200 | sudo tee $D/oc/power_limit       # back to the 275 W default
 - Fan/power latch after load: https://github.com/IGCIT/Intel-GPU-Community-Issue-Tracker-IGCIT/issues/1574
   and drm/xe issue #9462 (https://gitlab.freedesktop.org/drm/xe/kernel/-/issues/9462)
 
+## Attribution
+
+- `patches/0003-drm-xe-guc-Fix-wake_up-race-in-handle_sched_done.patch` is **third-party**: author Jakub
+  Legowski (reviewed by Matthew Brost), from the v3 posting on the stable list
+  (https://ratatoskr.run/stable/2026/09/17545816). GPL-2.0, carried unmodified with its original header; we only
+  applied it to 7.1.13. Not yet merged upstream when we took it.
+- Patches 0004-0006, `docs/` and `tools/` are ours (Evan Boldt).
+
 ## License
 
-- `patches/`: GPL-2.0 (`patches/LICENSE`), like the kernel they modify. Patch 0003 keeps its original
-  author.
-- `docs/` and `tools/`: **TODO, license to be chosen.**
+- `patches/`: GPL-2.0 (`patches/LICENSE`), like the kernel they modify.
+- Everything else (`docs/`, `tools/`, this README): MIT (`LICENSE`).

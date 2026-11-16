@@ -9,6 +9,7 @@ writes (0x5e/6 retried on busy, 0x5e/8 polled), the power-limit
 setter's domain choice and proportional rescaling, and the OC exit
 (0x5f/4, 0x5f/3). Exposed under dri/N/oc/{domains,power_limit,write,exit}.
 
+Signed-off-by: Evan Boldt <evan.d.boldt@gmail.com>
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  drivers/gpu/drm/xe/Makefile          |   1 +

@@ -1,0 +1,15 @@
+[Unit]
+Description=Arc Pro B70: refresh stale idle temperature telemetry (loud fan after load, IGCIT #1574)
+After=systemd-modules-load.service sys-kernel-debug.mount
+Requires=sys-kernel-debug.mount
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/b70-fan-refresh.sh
+# Environment=REFRESH_S=10 HOLD_MS=2 PKG_C=50 B70_PCI=0000:03:00.0
+Restart=on-failure
+RestartSec=30
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

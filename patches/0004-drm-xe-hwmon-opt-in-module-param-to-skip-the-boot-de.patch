@@ -10,6 +10,7 @@ With xe.power_limit_unclamped=1 the request goes to pcode, which still clamps it
 to the card-supported maximum (what the Windows control panel adjusts).
 Default behaviour is unchanged.
 
+Signed-off-by: Evan Boldt <evan.d.boldt@gmail.com>
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  drivers/gpu/drm/xe/xe_hwmon.c | 7 ++++++-

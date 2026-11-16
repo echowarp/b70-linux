@@ -1,0 +1,14 @@
+[Unit]
+Description=Arc Pro B70: smoothed fan curve (needs Intel's xe fan-control series 168027)
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/b70-fan-smooth.py
+ExecStopPost=/usr/bin/python3 -I /usr/local/sbin/b70-fan-smooth.py --stock
+# Environment=TAU_S=20 UP_PCT_S=0.5 DOWN_PCT_S=0.05 SAFE_C=80 HOT_C=90
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
