@@ -65,15 +65,15 @@ package plus a PCIe link that never sleeps. What we found, and why we could not 
 
 After a load ends, the reported package and VRAM temperatures can freeze at their last high values while
 the GT sits in RC6. Firmware fan control follows the stale readings, so the fan stays at ~2,400 rpm on an
-idle card. Intel has reproduced it; it is linked to drm/xe #9462 (package latched in G2). Any small request
-or a forcewake refreshes the readings.
+idle card. Intel has reproduced it; it is linked to drm/xe #9462 (package latched in G2). A small GPU request
+refreshes all readings (measured: package/VRAM 68/80 °C → 39/42 °C and the fan 2,390 → 1,095 rpm within ~30 s);
+a forcewake refreshes the package reading only.
 
 **Userspace workaround:** every 10 s, if gt0 `idle_status` is `gt-c6` and the reported package temperature
 is at least 50 °C, hold the debugfs `dri/<pci>/forcewake_all` file open for ~2 ms (opening it takes a
 forcewake reference, closing it drops it). This refreshes the **package** reading only; a forcewake does not
-refresh the VRAM sensor, but the package reading is what drags the fan along. Measured: package/VRAM
-68/80 °C → 39/42 °C and the fan 2,390 → 1,095 rpm within 30 s. The cost is a 2 ms wake every 10 s, and only
-while the latch condition holds.
+refresh the VRAM sensor (it stayed at a stale 72 °C in our test), but the package reading is what drags the fan
+along. The cost is a 2 ms wake every 10 s, and only while the latch condition holds.
 
 ## Links
 

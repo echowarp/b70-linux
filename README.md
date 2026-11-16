@@ -111,14 +111,14 @@ echo 2200 | sudo tee $D/oc/power_limit       # back to the 275 W default
 the GT drops into `gt-c6` after a load, those readings stop updating: hwmon reads do not wake the GT, so the package
 and VRAM temperatures stay frozen at their last loaded values (seen: 68 / 80 °C reported while the card was really
 39 / 42 °C) and the fan holds ~2,390 rpm on an idle card. It is the input, not the curve: the same happens in firmware
-fan mode (`pwm1_enable 2`) and with a user table. Anything that wakes the GT (a tiny request, a forcewake) refreshes
-the readings and the fan settles within ~30 s. See IGCIT #1574 / drm/xe #9462.
+fan mode (`pwm1_enable 2`) and with a user table. A tiny GPU request refreshes all readings (39 / 42 °C and
+~1,095 rpm within ~30 s); a bare forcewake refreshes the package reading but not VRAM. See IGCIT #1574 / drm/xe #9462.
 
 **Getting it lower (what worked, one ASRock B70 Creator):**
 - `tools/b70-fan-refresh/` polls on purpose, but only when it helps: every 10 s, if gt0 is in `gt-c6` and the
-  reported package temperature is >= 50 °C, it holds `debugfs dri/<pci>/forcewake_all` for ~2 ms. Result: idle fan
-  2,390 → 1,095 rpm within 30 s, readings back to the real temperatures. It stops waking the GT once the card reads
-  cool, so the GPU still reaches RC6 (a poller that wakes it unconditionally costs ~11 W at idle; see
+  reported package temperature is >= 50 °C, it holds `debugfs dri/<pci>/forcewake_all` for ~2 ms. That brings the
+  package reading back to the real temperature, and the fan follows it down; the VRAM reading stays stale until real
+  GPU work wakes the card. It stops waking the GT once the card reads cool, so the GPU still reaches RC6 (a poller that wakes it unconditionally costs ~11 W at idle; see
   `docs/monitoring.md`).
 - Gate on the **package** temperature only. A forcewake refreshes the package sensor but not VRAM; gating on VRAM kept
   waking the GT every 10 s (17 wakes in 3 min) and made the fan swing ~600 ↔ 1,250 rpm.
