@@ -1,0 +1,150 @@
+From b3f3b261235ce120c5a1504d9c9a0f2123e7b353 Mon Sep 17 00:00:00 2001
+From: Evan Boldt <evan.d.boldt@gmail.com>
+Date: Tue, 29 Sep 2026 23:33:36 +0000
+Subject: [PATCH] [EXPERIMENTAL] drm/xe: module param to set the Battlemage GDDR rate at probe
+
+xe.oc_mem_mbps=<Mbps> writes OC domain 0x17 (sub 7 param 2) from
+xe_device_probe_early(), right after pcode reports init complete and
+before any GT, GGTT or VRAM use. Writing it through the oc/write
+debugfs file with the GT running hung GT0 forcewake within 0.6 s.
+Enumerates the OC domains first (as the Windows KMD does), range-checks
+against the domain min/max, then re-waits for pcode init and fails the
+probe cleanly if LMEM_INIT is clear. Default 0 = leave the rate alone.
+
+EXPERIMENTAL: on our board (ASRock Arc Pro B70 Creator) any rate above
+stock (20000 Mbps tried, at probe and live) hangs GT0 forcewake about
+50-600 ms after the write. We run with it disabled (param unset).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/xe/xe_device.c |  5 +++
+ drivers/gpu/drm/xe/xe_oc.c     | 64 ++++++++++++++++++++++++++++++++++
+ drivers/gpu/drm/xe/xe_oc.h     |  6 ++++
+ 3 files changed, 75 insertions(+)
+
+diff --git a/drivers/gpu/drm/xe/xe_device.c b/drivers/gpu/drm/xe/xe_device.c
+index b4410fa82..f29efaa05 100644
+--- a/drivers/gpu/drm/xe/xe_device.c
++++ b/drivers/gpu/drm/xe/xe_device.c
+@@ -52,6 +52,7 @@
+ #include "xe_nvm.h"
+ #include "xe_oa.h"
+ #include "xe_observation.h"
++#include "xe_oc.h"
+ #include "xe_pagefault.h"
+ #include "xe_pat.h"
+ #include "xe_pcode.h"
+@@ -760,6 +761,10 @@ int xe_device_probe_early(struct xe_device *xe)
+ 	 */
+ 	assert_lmem_ready(xe);
+ 
++	err = xe_oc_probe_early(xe);
++	if (err)
++		return err;
++
+ 	xe->wedged.mode = xe_device_validate_wedged_mode(xe, xe_modparam.wedged_mode) ?
+ 			  XE_DEFAULT_WEDGED_MODE : xe_modparam.wedged_mode;
+ 	drm_dbg(&xe->drm, "wedged_mode: setting mode (%u) %s\n",
+diff --git a/drivers/gpu/drm/xe/xe_oc.c b/drivers/gpu/drm/xe/xe_oc.c
+index bc320f9dd..561ccafad 100644
+--- a/drivers/gpu/drm/xe/xe_oc.c
++++ b/drivers/gpu/drm/xe/xe_oc.c
+@@ -25,12 +25,19 @@
+ #include <drm/drm_managed.h>
+ #include <drm/drm_print.h>
+ 
++#include "regs/xe_regs.h"
+ #include "xe_device.h"
++#include "xe_mmio.h"
+ #include "xe_oc.h"
+ #include "xe_pcode.h"
+ #include "xe_pcode_api.h"
+ #include "xe_pm.h"
+ 
++static unsigned int oc_mem_mbps;
++module_param_named(oc_mem_mbps, oc_mem_mbps, uint, 0400);
++MODULE_PARM_DESC(oc_mem_mbps,
++		 "Battlemage: set the GDDR data rate (OC domain 0x17, Mbps) at probe, before the GT is initialised; 0 = leave it (default: 0)");
++
+ #define OC_CAPS			0x5f
+ #define   OC_CAPS_SUBS		0x0
+ #define   OC_CAPS_PARAMS	0x1
+@@ -395,3 +402,60 @@ void xe_oc_debugfs_register(struct xe_device *xe, struct dentry *root)
+ 	debugfs_create_file("write", 0200, dir, xe, &oc_write_fops);
+ 	debugfs_create_file("exit", 0200, dir, xe, &oc_exit_fops);
+ }
++
++#define OC_MEM_SUB	7
++#define OC_MEM_PARAM	2
++
++/*
++ * Set the GDDR data rate before anything uses the GT or VRAM. Writing it
++ * through debugfs with the GT running hangs GT0 forcewake within a second, so
++ * this runs from xe_device_probe_early(), right after pcode reports init
++ * complete. Enumerates first, as the Windows KMD does, then re-checks pcode
++ * and LMEM_INIT; if VRAM isn't ready afterwards the probe fails cleanly.
++ */
++int xe_oc_probe_early(struct xe_device *xe)
++{
++	struct xe_oc_dom *d;
++	struct xe_oc *oc;
++	int ret;
++
++	if (!oc_mem_mbps || xe->info.platform != XE_BATTLEMAGE || !IS_DGFX(xe) ||
++	    xe->info.skip_pcode)
++		return 0;
++
++	oc = kzalloc(sizeof(*oc), GFP_KERNEL);
++	if (!oc)
++		return 0;
++
++	ret = oc_enumerate(xe, oc);
++	d = &oc->dom[OC_MEM_SUB][OC_MEM_PARAM];
++	if (ret || !d->valid) {
++		drm_warn(&xe->drm, "oc: probe: memory rate domain not available (%d)\n", ret);
++		goto out;
++	}
++	if (oc_mem_mbps < d->min || oc_mem_mbps > d->max) {
++		drm_warn(&xe->drm, "oc: probe: %u Mbps outside %u..%u, not set\n",
++			 oc_mem_mbps, d->min, d->max);
++		goto out;
++	}
++
++	drm_info(&xe->drm, "oc: probe: setting memory rate %u Mbps (default %u)\n",
++		 oc_mem_mbps, d->def);
++	ret = oc_write_dom(xe, OC_MEM_SUB, OC_MEM_PARAM, oc_mem_mbps);
++	if (ret)
++		drm_warn(&xe->drm, "oc: probe: memory rate write failed: %d\n", ret);
++
++	msleep(100);
++	ret = xe_pcode_ready(xe, false);
++	if (ret)
++		goto out;
++	if (!(xe_mmio_read32(xe_root_tile_mmio(xe), GU_CNTL) & LMEM_INIT)) {
++		drm_err(&xe->drm, "oc: probe: LMEM_INIT clear after memory rate change\n");
++		ret = -EIO;
++		goto out;
++	}
++	drm_info(&xe->drm, "oc: probe: pcode ready, LMEM_INIT set\n");
++out:
++	kfree(oc);
++	return ret == -EIO ? ret : 0;
++}
+diff --git a/drivers/gpu/drm/xe/xe_oc.h b/drivers/gpu/drm/xe/xe_oc.h
+index 6bb3a9cba..8d7f1e8f2 100644
+--- a/drivers/gpu/drm/xe/xe_oc.h
++++ b/drivers/gpu/drm/xe/xe_oc.h
+@@ -7,4 +7,10 @@ struct xe_device;
+ 
+ void xe_oc_debugfs_register(struct xe_device *xe, struct dentry *root);
+ 
++#ifdef CONFIG_DEBUG_FS
++int xe_oc_probe_early(struct xe_device *xe);
++#else
++static inline int xe_oc_probe_early(struct xe_device *xe) { return 0; }
++#endif
++
+ #endif
+-- 
+2.53.0
+

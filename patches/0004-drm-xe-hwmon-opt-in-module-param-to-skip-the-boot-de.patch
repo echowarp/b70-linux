@@ -1,0 +1,45 @@
+From 2eef83169b376f971170a72ca236fa06733989a4 Mon Sep 17 00:00:00 2001
+From: Evan Boldt <evan.d.boldt@gmail.com>
+Date: Tue, 29 Sep 2026 17:25:04 +0000
+Subject: [PATCH] drm/xe/hwmon: opt-in module param to skip the boot-default
+ power limit clamp
+
+xe clamps mailbox power-limit writes to the firmware default read at boot
+(pl1_on_boot/pl2_on_boot) as extra protection on top of pcode's own clamp.
+With xe.power_limit_unclamped=1 the request goes to pcode, which still clamps it
+to the card-supported maximum (what the Windows control panel adjusts).
+Default behaviour is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/xe/xe_hwmon.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/xe/xe_hwmon.c b/drivers/gpu/drm/xe/xe_hwmon.c
+index 92e423a33..373336aaf 100644
+--- a/drivers/gpu/drm/xe/xe_hwmon.c
++++ b/drivers/gpu/drm/xe/xe_hwmon.c
+@@ -23,6 +23,11 @@
+ #include "xe_vsec.h"
+ #include "regs/xe_pmt.h"
+ 
++static bool power_limit_unclamped;
++module_param_named(power_limit_unclamped, power_limit_unclamped, bool, 0600);
++MODULE_PARM_DESC(power_limit_unclamped,
++		 "Pass mailbox power limits above the boot default to pcode, which still clamps to the card-supported maximum (default: false)");
++
+ enum xe_hwmon_reg {
+ 	REG_TEMP,
+ 	REG_PKG_RAPL_LIMIT,
+@@ -422,7 +427,7 @@ static int xe_hwmon_power_max_write(struct xe_hwmon *hwmon, u32 attr, int channe
+ 	 * Clamp power limit to GPU firmware default as maximum, as an additional protection to
+ 	 * pcode clamp.
+ 	 */
+-	if (hwmon->xe->info.has_mbx_power_limits) {
++	if (hwmon->xe->info.has_mbx_power_limits && !power_limit_unclamped) {
+ 		max = (attr == PL1_HWMON_ATTR) ?
+ 		       hwmon->pl1_on_boot[channel] : hwmon->pl2_on_boot[channel];
+ 		max = REG_FIELD_PREP(PWR_LIM_VAL, max);
+-- 
+2.53.0
+

@@ -1,0 +1,76 @@
+From 83490ab9733db67443738b47c6887c050f6056f6 Mon Sep 17 00:00:00 2001
+From: Jakub Legowski <unknown@intel.invalid>
+Date: Mon, 28 Sep 2026 18:12:14 +0000
+Subject: [PATCH] drm/xe/guc: Fix wake_up race in handle_sched_done
+
+Move wake_up_all() after clear_exec_queue_pending_disable()
+
+When a SCHED_DONE G2H arrives for a banned exec queue,
+handle_sched_done() calls wake_up_all() before
+clear_exec_queue_pending_disable(). This creates a race with the
+wait_event_timeout() in guc_exec_queue_timedout_job() that waits
+for pending_disable to be cleared.
+
+Moving the wake_up_all() (along with its smp_wmb()) after all paths
+that clear pending_disable, ensuring that waiters always observe the
+updated state when woken.
+
+Fixes: dd08ebf6c352 ("drm/xe: Introduce a new DRM driver for Intel GPUs")
+Cc: stable@vger.kernel.org
+Reviewed-by: Matthew Brost <matthew.brost@intel.com>
+Link: https://ratatoskr.run/stable/2026/09/17545816
+[backport to 7.1.13: hand-applied from the v3 posting, not yet merged
+ upstream as of 2026-09-28]
+---
+ drivers/gpu/drm/xe/xe_guc_submit.c | 30 ++++++++++++++++--------------
+ 1 file changed, 16 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/xe/xe_guc_submit.c b/drivers/gpu/drm/xe/xe_guc_submit.c
+index b8465553a..49c417534 100644
+--- a/drivers/gpu/drm/xe/xe_guc_submit.c
++++ b/drivers/gpu/drm/xe/xe_guc_submit.c
+@@ -2851,25 +2851,27 @@ static void handle_sched_done(struct xe_guc *guc, struct xe_exec_queue *q,
+ 			clear_exec_queue_pending_disable(q);
+ 			suspend_fence_signal(q);
+ 		} else {
++			bool destroyed = exec_queue_destroyed(q);
++
++			/*
++			 * Make sure to clear the pending_disable only
++			 * after sampling the destroyed state. We want
++			 * to ensure we don't trigger the unregister too
++			 * early with something intending to only
++			 * disable scheduling. The caller doing the
++			 * destroy must wait for an ongoing
++			 * pending_disable before marking as destroyed.
++			 */
++			clear_exec_queue_pending_disable(q);
++
+ 			if (exec_queue_banned(q)) {
++				/* Pairs with smp_rmb in guc_exec_queue_timedout_job */
+ 				smp_wmb();
+ 				wake_up_all(&guc->ct.wq);
+ 			}
+-			if (exec_queue_destroyed(q)) {
+-				/*
+-				 * Make sure to clear the pending_disable only
+-				 * after sampling the destroyed state. We want
+-				 * to ensure we don't trigger the unregister too
+-				 * early with something intending to only
+-				 * disable scheduling. The caller doing the
+-				 * destroy must wait for an ongoing
+-				 * pending_disable before marking as destroyed.
+-				 */
+-				clear_exec_queue_pending_disable(q);
++
++			if (destroyed)
+ 				deregister_exec_queue(guc, q);
+-			} else {
+-				clear_exec_queue_pending_disable(q);
+-			}
+ 		}
+ 	}
+ }
+-- 
+2.53.0
+

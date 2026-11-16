@@ -1,0 +1,560 @@
+From 4a8a5b71fb07bab0560db43e95d82bd4d7dd1d6f Mon Sep 17 00:00:00 2001
+From: Evan Boldt <evan.d.boldt@gmail.com>
+Date: Tue, 29 Sep 2026 20:46:23 +0000
+Subject: [PATCH] drm/xe: debugfs for Battlemage pcode overclocking domains
+
+Replays the Windows KMD (32.0.101.9033) IGCL overclock sequence:
+capability enumeration (0x5f/0, 0x5f/1, 0x5e/0-4), stage/commit
+writes (0x5e/6 retried on busy, 0x5e/8 polled), the power-limit
+setter's domain choice and proportional rescaling, and the OC exit
+(0x5f/4, 0x5f/3). Exposed under dri/N/oc/{domains,power_limit,write,exit}.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/xe/Makefile          |   1 +
+ drivers/gpu/drm/xe/xe_debugfs.c      |   3 +
+ drivers/gpu/drm/xe/xe_device_types.h |   3 +
+ drivers/gpu/drm/xe/xe_oc.c           | 397 +++++++++++++++++++++++++++
+ drivers/gpu/drm/xe/xe_oc.h           |  10 +
+ drivers/gpu/drm/xe/xe_pcode.c        |  44 +++
+ drivers/gpu/drm/xe/xe_pcode.h        |   1 +
+ 7 files changed, 459 insertions(+)
+ create mode 100644 drivers/gpu/drm/xe/xe_oc.c
+ create mode 100644 drivers/gpu/drm/xe/xe_oc.h
+
+diff --git a/drivers/gpu/drm/xe/Makefile b/drivers/gpu/drm/xe/Makefile
+index de36c8b64..5c7f913a9 100644
+--- a/drivers/gpu/drm/xe/Makefile
++++ b/drivers/gpu/drm/xe/Makefile
+@@ -345,6 +345,7 @@ endif
+ 
+ ifeq ($(CONFIG_DEBUG_FS),y)
+ 	xe-y += xe_debugfs.o \
++		xe_oc.o \
+ 		xe_gt_debugfs.o \
+ 		xe_gt_sriov_vf_debugfs.o \
+ 		xe_gt_stats.o \
+diff --git a/drivers/gpu/drm/xe/xe_debugfs.c b/drivers/gpu/drm/xe/xe_debugfs.c
+index ad2d8f179..887279111 100644
+--- a/drivers/gpu/drm/xe/xe_debugfs.c
++++ b/drivers/gpu/drm/xe/xe_debugfs.c
+@@ -19,6 +19,7 @@
+ #include "xe_gt_printk.h"
+ #include "xe_guc_ads.h"
+ #include "xe_mmio.h"
++#include "xe_oc.h"
+ #include "xe_pm.h"
+ #include "xe_psmi.h"
+ #include "xe_pxp_debugfs.h"
+@@ -550,6 +551,8 @@ void xe_debugfs_register(struct xe_device *xe)
+ 	debugfs_create_file("disable_late_binding", 0600, root, xe,
+ 			    &disable_late_binding_fops);
+ 
++	xe_oc_debugfs_register(xe, root);
++
+ 	/*
+ 	 * Don't expose page reclaim configuration file if not supported by the
+ 	 * hardware initially.
+diff --git a/drivers/gpu/drm/xe/xe_device_types.h b/drivers/gpu/drm/xe/xe_device_types.h
+index 7e0901ac9..1ac04bcc3 100644
+--- a/drivers/gpu/drm/xe/xe_device_types.h
++++ b/drivers/gpu/drm/xe/xe_device_types.h
+@@ -470,6 +470,9 @@ struct xe_device {
+ 	/** @late_bind: xe mei late bind interface */
+ 	struct xe_late_bind late_bind;
+ 
++	/** @oc: pcode overclocking domains (debugfs) */
++	struct xe_oc *oc;
++
+ 	/** @oa: oa observation subsystem */
+ 	struct xe_oa oa;
+ 
+diff --git a/drivers/gpu/drm/xe/xe_oc.c b/drivers/gpu/drm/xe/xe_oc.c
+new file mode 100644
+index 000000000..bc320f9dd
+--- /dev/null
++++ b/drivers/gpu/drm/xe/xe_oc.c
+@@ -0,0 +1,397 @@
++// SPDX-License-Identifier: MIT
++/*
++ * Battlemage pcode overclocking domains, debugfs only.
++ *
++ * Reproduces what the Windows KMD (igdkmdnd64 32.0.101.9033) does for the
++ * IGCL ctlOverclock*V2 calls:
++ *
++ *   0x5f/0/0            -> bitmask of supported subs
++ *   0x5f/1/sub          -> bitmask of supported params in that sub
++ *   0x5e/n/dom          -> dom = param << 3 | sub; n = 0 min, 1 max,
++ *                          2 (unknown), 3 default, 4 status, 5 current
++ *   0x5e/6/dom d0=v     -> stage a value, retried while pcode says busy (0xb)
++ *   0x5e/8/dom          -> commit, polled until bits 19:16 clear
++ *   0x5f/4/0 d0=1, 0x5f/3/0 -> leave OC mode (sent once everything is default)
++ *
++ * The power limit is param 5 or 6 in sub 0 or 1. Changing it also rescales
++ * params 7, 0xf-0x12 and the other of 5/6 in that sub by the same percentage
++ * of their defaults, clamped to their min/max.
++ */
++
++#include <linux/debugfs.h>
++#include <linux/delay.h>
++#include <linux/seq_file.h>
++
++#include <drm/drm_managed.h>
++#include <drm/drm_print.h>
++
++#include "xe_device.h"
++#include "xe_oc.h"
++#include "xe_pcode.h"
++#include "xe_pcode_api.h"
++#include "xe_pm.h"
++
++#define OC_CAPS			0x5f
++#define   OC_CAPS_SUBS		0x0
++#define   OC_CAPS_PARAMS	0x1
++#define   OC_CAPS_EXIT_STATUS	0x3
++#define   OC_CAPS_EXIT		0x4
++#define OC_DOMAIN		0x5e
++#define   OC_DOM_MIN		0x0
++#define   OC_DOM_MAX		0x1
++#define   OC_DOM_UNK2		0x2
++#define   OC_DOM_DEFAULT	0x3
++#define   OC_DOM_STATUS		0x4
++#define   OC_DOM_CUR		0x5
++#define   OC_DOM_WRITE		0x6
++#define   OC_DOM_COMMIT		0x8
++#define OC_BUSY			0xb
++#define OC_PENDING		GENMASK(19, 16)
++#define OC_RETRIES		5
++
++#define OC_SUBS			8
++#define OC_PARAMS		0x14
++
++struct xe_oc_dom {
++	bool valid;
++	u32 min, max, unk2, def, status;
++};
++
++struct xe_oc {
++	struct mutex lock;
++	bool enumerated;
++	u32 subs;
++	u32 params[OC_SUBS];
++	struct xe_oc_dom dom[OC_SUBS][OC_PARAMS];
++};
++
++static struct xe_tile *oc_tile(struct xe_device *xe)
++{
++	return xe_device_get_root_tile(xe);
++}
++
++static int oc_rw(struct xe_device *xe, u8 op, u8 p1, u8 p2, u32 d0, u32 *out)
++{
++	u32 data0 = d0, data1 = 0;
++	int ret;
++
++	ret = xe_pcode_rw_status(oc_tile(xe), PCODE_MBOX(op, p1, p2), &data0, &data1);
++	if (out)
++		*out = data0;
++	return ret;
++}
++
++static u8 oc_dom_id(int sub, int param)
++{
++	return param << 3 | sub;
++}
++
++/* Windows only queries param 0x13 on these device ids. */
++static bool oc_param13_allowed(struct xe_device *xe)
++{
++	u32 idx = (u16)(xe->info.devid - 0xe201);
++
++	return idx <= 0x22 && (0x7800002f9ULL & BIT_ULL(idx));
++}
++
++static int oc_enumerate(struct xe_device *xe, struct xe_oc *oc)
++{
++	int sub, param, ret;
++
++	memset(oc->dom, 0, sizeof(oc->dom));
++	memset(oc->params, 0, sizeof(oc->params));
++	oc->enumerated = false;
++
++	ret = oc_rw(xe, OC_CAPS, OC_CAPS_SUBS, 0, 0, &oc->subs);
++	if (ret)
++		return ret < 0 ? ret : -EPROTO;
++
++	for (sub = 0; sub < OC_SUBS; sub++) {
++		if (!(oc->subs & BIT(sub)))
++			continue;
++		ret = oc_rw(xe, OC_CAPS, OC_CAPS_PARAMS, sub, 0, &oc->params[sub]);
++		if (ret) {
++			oc->params[sub] = 0;
++			continue;
++		}
++		for (param = 0; param < OC_PARAMS; param++) {
++			struct xe_oc_dom *d = &oc->dom[sub][param];
++			u8 id = oc_dom_id(sub, param);
++
++			if (!(oc->params[sub] & BIT(param)))
++				continue;
++			if (param == 0x13 && !oc_param13_allowed(xe))
++				continue;
++			if (oc_rw(xe, OC_DOMAIN, OC_DOM_MIN, id, 0, &d->min) ||
++			    oc_rw(xe, OC_DOMAIN, OC_DOM_MAX, id, 0, &d->max))
++				continue;
++			oc_rw(xe, OC_DOMAIN, OC_DOM_UNK2, id, 0, &d->unk2);
++			oc_rw(xe, OC_DOMAIN, OC_DOM_DEFAULT, id, 0, &d->def);
++			d->status = oc_rw(xe, OC_DOMAIN, OC_DOM_STATUS, id, 0, NULL);
++			d->valid = true;
++		}
++	}
++	oc->enumerated = true;
++	return 0;
++}
++
++/* Stage and commit one domain value, as the Windows KMD does. */
++static int oc_write_dom(struct xe_device *xe, int sub, int param, u32 val)
++{
++	u8 id = oc_dom_id(sub, param);
++	u32 out;
++	int i, ret;
++
++	for (i = 0; i < OC_RETRIES; i++) {
++		ret = oc_rw(xe, OC_DOMAIN, OC_DOM_WRITE, id, val, NULL);
++		if (ret != OC_BUSY)
++			break;
++		usleep_range(1000, 1500);
++	}
++	drm_info(&xe->drm, "oc: write dom 0x%02x = %u (0x%x): status %d\n",
++		 id, val, val, ret);
++	if (ret)
++		return ret < 0 ? ret : -EPROTO;
++
++	for (i = 0; i < OC_RETRIES; i++) {
++		usleep_range(1000, 1500);
++		ret = oc_rw(xe, OC_DOMAIN, OC_DOM_COMMIT, id, 0, &out);
++		if (!ret && !(out & OC_PENDING))
++			return 0;
++	}
++	drm_warn(&xe->drm, "oc: commit dom 0x%02x: status %d out 0x%08x\n",
++		 id, ret, out);
++	return ret < 0 ? ret : -EPROTO;
++}
++
++/* Scale @param by @pct percent of its default, clamped, as Windows does. */
++static void oc_scale_dom(struct xe_device *xe, struct xe_oc *oc, int sub,
++			 int param, u32 pct)
++{
++	struct xe_oc_dom *d = &oc->dom[sub][param];
++	u32 v;
++
++	if (!d->valid)
++		return;
++	v = DIV_ROUND_CLOSEST(d->def * pct, 100);
++	v = clamp(v, d->min, d->max);
++	oc_write_dom(xe, sub, param, v);
++}
++
++static bool oc_power_dom(struct xe_oc *oc, int *sub, int *param)
++{
++	bool f08 = oc->dom[0][5].valid || oc->dom[0][6].valid;
++	struct xe_oc_dom *a, *b;
++	bool f09;
++
++	/* Windows sets these two flags at init from sub 0 or 1, params 5/6. */
++	a = f08 ? &oc->dom[1][5] : &oc->dom[0][5];
++	b = f08 ? &oc->dom[1][6] : &oc->dom[0][6];
++	if (!a->valid)
++		f09 = false;
++	else if (!b->valid)
++		f09 = true;
++	else if (!a->def)
++		f09 = false;
++	else
++		f09 = !b->def || a->def < b->def;
++
++	*sub = f08 ? 0 : 1;
++	*param = f09 ? 5 : 6;
++	return oc->dom[*sub][*param].valid;
++}
++
++static int oc_set_power(struct xe_device *xe, struct xe_oc *oc, u32 val)
++{
++	static const int scaled[] = { 7, 0xf, 0x10, 0x11, 0x12 };
++	int sub, param, i;
++	struct xe_oc_dom *d;
++	u32 pct;
++
++	if (!oc_power_dom(oc, &sub, &param))
++		return -ENODEV;
++	d = &oc->dom[sub][param];
++	if (val < d->min || val > d->max || !d->def)
++		return -ERANGE;
++
++	pct = DIV_ROUND_CLOSEST(val * 100, d->def);
++	if (oc->dom[0][5].valid || oc->dom[0][6].valid)
++		for (i = 0; i < ARRAY_SIZE(scaled); i++)
++			oc_scale_dom(xe, oc, sub, scaled[i], pct);
++	oc_scale_dom(xe, oc, sub, param == 5 ? 6 : 5, pct);
++
++	return oc_write_dom(xe, sub, param, val);
++}
++
++static int oc_exit(struct xe_device *xe)
++{
++	u32 out;
++	int i, ret;
++
++	for (i = 0; i < OC_RETRIES; i++) {
++		ret = oc_rw(xe, OC_CAPS, OC_CAPS_EXIT, 0, 1, NULL);
++		if (ret != OC_BUSY)
++			break;
++		usleep_range(1000, 1500);
++	}
++	if (ret)
++		return ret < 0 ? ret : -EPROTO;
++
++	for (i = 0; i < OC_RETRIES; i++) {
++		usleep_range(1000, 1500);
++		ret = oc_rw(xe, OC_CAPS, OC_CAPS_EXIT_STATUS, 0, 0, &out);
++		if (!ret && !(out & OC_PENDING))
++			return 0;
++	}
++	return ret < 0 ? ret : -EPROTO;
++}
++
++static int oc_domains_show(struct seq_file *m, void *data)
++{
++	struct xe_device *xe = m->private;
++	struct xe_oc *oc = xe->oc;
++	int sub, param, psub, pparam, ret;
++
++	guard(xe_pm_runtime)(xe);
++	guard(mutex)(&oc->lock);
++
++	ret = oc_enumerate(xe, oc);
++	if (ret) {
++		seq_printf(m, "enumeration failed: %d\n", ret);
++		return 0;
++	}
++
++	seq_printf(m, "subs 0x%08x\n", oc->subs);
++	for (sub = 0; sub < OC_SUBS; sub++)
++		if (oc->subs & BIT(sub))
++			seq_printf(m, "sub %d params 0x%08x\n", sub, oc->params[sub]);
++	seq_puts(m, "dom  sub param        min        max       unk2    default st        cur (st)\n");
++	for (sub = 0; sub < OC_SUBS; sub++) {
++		for (param = 0; param < OC_PARAMS; param++) {
++			struct xe_oc_dom *d = &oc->dom[sub][param];
++			u32 cur = 0;
++			int st;
++
++			if (!d->valid)
++				continue;
++			st = oc_rw(xe, OC_DOMAIN, OC_DOM_CUR, oc_dom_id(sub, param), 0, &cur);
++			seq_printf(m, "0x%02x %3d  0x%02x %10u %10u %10u %10u %2d %10u (%d)\n",
++				   oc_dom_id(sub, param), sub, param, d->min, d->max,
++				   d->unk2, d->def, d->status, cur, st);
++		}
++	}
++	if (oc_power_dom(oc, &psub, &pparam))
++		seq_printf(m, "power limit domain: 0x%02x\n", oc_dom_id(psub, pparam));
++	else
++		seq_puts(m, "power limit domain: none\n");
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(oc_domains);
++
++static ssize_t oc_power_limit_write(struct file *f, const char __user *ubuf,
++				    size_t size, loff_t *pos)
++{
++	struct xe_device *xe = file_inode(f)->i_private;
++	struct xe_oc *oc = xe->oc;
++	u32 val;
++	int ret;
++
++	ret = kstrtou32_from_user(ubuf, size, 0, &val);
++	if (ret)
++		return ret;
++
++	guard(xe_pm_runtime)(xe);
++	guard(mutex)(&oc->lock);
++	if (!oc->enumerated) {
++		ret = oc_enumerate(xe, oc);
++		if (ret)
++			return ret;
++	}
++	ret = oc_set_power(xe, oc, val);
++	return ret ?: size;
++}
++
++static const struct file_operations oc_power_limit_fops = {
++	.owner = THIS_MODULE,
++	.write = oc_power_limit_write,
++};
++
++/* "<dom> <value>": stage and commit one enumerated domain within min/max. */
++static ssize_t oc_write_write(struct file *f, const char __user *ubuf,
++			      size_t size, loff_t *pos)
++{
++	struct xe_device *xe = file_inode(f)->i_private;
++	struct xe_oc *oc = xe->oc;
++	struct xe_oc_dom *d;
++	char buf[48];
++	u32 id, val;
++	int ret;
++
++	if (size >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, size))
++		return -EFAULT;
++	buf[size] = 0;
++	if (sscanf(buf, "%i %i", &id, &val) != 2 || (id & 7) >= OC_SUBS ||
++	    (id >> 3) >= OC_PARAMS)
++		return -EINVAL;
++
++	guard(xe_pm_runtime)(xe);
++	guard(mutex)(&oc->lock);
++	if (!oc->enumerated) {
++		ret = oc_enumerate(xe, oc);
++		if (ret)
++			return ret;
++	}
++	d = &oc->dom[id & 7][id >> 3];
++	if (!d->valid)
++		return -ENODEV;
++	if (val < d->min || val > d->max)
++		return -ERANGE;
++	ret = oc_write_dom(xe, id & 7, id >> 3, val);
++	return ret ?: size;
++}
++
++static const struct file_operations oc_write_fops = {
++	.owner = THIS_MODULE,
++	.write = oc_write_write,
++};
++
++static ssize_t oc_exit_write(struct file *f, const char __user *ubuf,
++			     size_t size, loff_t *pos)
++{
++	struct xe_device *xe = file_inode(f)->i_private;
++	int ret;
++
++	guard(xe_pm_runtime)(xe);
++	guard(mutex)(&xe->oc->lock);
++	ret = oc_exit(xe);
++	drm_info(&xe->drm, "oc: exit: %d\n", ret);
++	return ret ?: size;
++}
++
++static const struct file_operations oc_exit_fops = {
++	.owner = THIS_MODULE,
++	.write = oc_exit_write,
++};
++
++void xe_oc_debugfs_register(struct xe_device *xe, struct dentry *root)
++{
++	struct dentry *dir;
++
++	if (xe->info.platform != XE_BATTLEMAGE || !IS_DGFX(xe) ||
++	    xe->info.skip_pcode)
++		return;
++
++	xe->oc = drmm_kzalloc(&xe->drm, sizeof(*xe->oc), GFP_KERNEL);
++	if (!xe->oc)
++		return;
++	if (drmm_mutex_init(&xe->drm, &xe->oc->lock))
++		return;
++
++	dir = debugfs_create_dir("oc", root);
++	debugfs_create_file("domains", 0400, dir, xe, &oc_domains_fops);
++	debugfs_create_file("power_limit", 0200, dir, xe, &oc_power_limit_fops);
++	debugfs_create_file("write", 0200, dir, xe, &oc_write_fops);
++	debugfs_create_file("exit", 0200, dir, xe, &oc_exit_fops);
++}
+diff --git a/drivers/gpu/drm/xe/xe_oc.h b/drivers/gpu/drm/xe/xe_oc.h
+new file mode 100644
+index 000000000..6bb3a9cba
+--- /dev/null
++++ b/drivers/gpu/drm/xe/xe_oc.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef _XE_OC_H_
++#define _XE_OC_H_
++
++struct dentry;
++struct xe_device;
++
++void xe_oc_debugfs_register(struct xe_device *xe, struct dentry *root);
++
++#endif
+diff --git a/drivers/gpu/drm/xe/xe_pcode.c b/drivers/gpu/drm/xe/xe_pcode.c
+index dc66d0c7e..2baf3c7ea 100644
+--- a/drivers/gpu/drm/xe/xe_pcode.c
++++ b/drivers/gpu/drm/xe/xe_pcode.c
+@@ -132,6 +132,50 @@ int xe_pcode_write64_timeout(struct xe_tile *tile, u32 mbox, u32 data0, u32 data
+ 	return err;
+ }
+ 
++/**
++ * xe_pcode_rw_status - mailbox transaction that returns pcode's raw status
++ * @tile: tile
++ * @mbox: PCODE_MBOX() command
++ * @data0: in/out DATA0
++ * @data1: in/out DATA1
++ *
++ * For callers that need to act on the status byte themselves (e.g. retry on
++ * busy) without the error log of the regular helpers.
++ *
++ * Returns: the status byte (0 = success) or a negative errno if the mailbox
++ * was busy or timed out.
++ */
++int xe_pcode_rw_status(struct xe_tile *tile, u32 mbox, u32 *data0, u32 *data1)
++{
++	struct xe_mmio *mmio = &tile->mmio;
++	int err;
++
++	if (tile_to_xe(tile)->info.skip_pcode)
++		return -ENODEV;
++
++	mutex_lock(&tile->pcode.lock);
++	if (xe_mmio_read32(mmio, PCODE_MAILBOX) & PCODE_READY) {
++		err = -EAGAIN;
++		goto unlock;
++	}
++
++	xe_mmio_write32(mmio, PCODE_DATA0, *data0);
++	xe_mmio_write32(mmio, PCODE_DATA1, *data1);
++	xe_mmio_write32(mmio, PCODE_MAILBOX, PCODE_READY | mbox);
++
++	err = xe_mmio_wait32(mmio, PCODE_MAILBOX, PCODE_READY, 0,
++			     10 * USEC_PER_MSEC, NULL, false);
++	if (err)
++		goto unlock;
++
++	*data0 = xe_mmio_read32(mmio, PCODE_DATA0);
++	*data1 = xe_mmio_read32(mmio, PCODE_DATA1);
++	err = xe_mmio_read32(mmio, PCODE_MAILBOX) & PCODE_ERROR_MASK;
++unlock:
++	mutex_unlock(&tile->pcode.lock);
++	return err;
++}
++
+ int xe_pcode_read(struct xe_tile *tile, u32 mbox, u32 *val, u32 *val1)
+ {
+ 	int err;
+diff --git a/drivers/gpu/drm/xe/xe_pcode.h b/drivers/gpu/drm/xe/xe_pcode.h
+index 490e4f269..492319805 100644
+--- a/drivers/gpu/drm/xe/xe_pcode.h
++++ b/drivers/gpu/drm/xe/xe_pcode.h
+@@ -18,6 +18,7 @@ int xe_pcode_ready(struct xe_device *xe, bool locked);
+ int xe_pcode_init_min_freq_table(struct xe_tile *tile, u32 min_gt_freq,
+ 				 u32 max_gt_freq);
+ int xe_pcode_read(struct xe_tile *tile, u32 mbox, u32 *val, u32 *val1);
++int xe_pcode_rw_status(struct xe_tile *tile, u32 mbox, u32 *data0, u32 *data1);
+ int xe_pcode_write_timeout(struct xe_tile *tile, u32 mbox, u32 val,
+ 			   int timeout_ms);
+ int xe_pcode_write64_timeout(struct xe_tile *tile, u32 mbox, u32 data0,
+-- 
+2.53.0
+
