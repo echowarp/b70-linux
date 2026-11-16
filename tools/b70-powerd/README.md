@@ -19,4 +19,6 @@ printf 'fan smooth\n' | socat - UNIX-CONNECT:/run/b70-powerd.sock
 Run it as root from a systemd unit (`ExecStart=/usr/bin/python3 -I /usr/local/sbin/b70-powerd.py`, `Restart=on-failure`).
 Python 3 standard library only.
 
+`b70-power` is a small client CLI (no sudo, for the user allowed by `B70_POWERD_ALLOW_UID`): `b70-power` shows mode, limit, live card power, fan and VRAM temperature; `b70-power 250` holds 250 W (150..330) until `b70-power auto` hands control back to the profile-following `../b70-governor`, which must be running for the override to take effect.
+
 License: MIT (`../../LICENSE`).

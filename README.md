@@ -26,6 +26,7 @@ clock. Treat the numbers as one board's results, not a specification.
 | `tools/b70-fan-refresh/` | Script + systemd unit: userspace workaround for the stale-temperature fan latch (IGCIT #1574), no kernel patch |
 | `tools/b70-fan-smooth/` | Optional calmer fan curve (script + unit); needs Intel's xe fan-control series 168027 |
 | `tools/b70-powerd/` | Root daemon: power limit via `oc/power_limit`, VRAM guard, re-apply after reset, plus both fan functions |
+| `tools/b70-governor/` | User service: follows the desktop power plan (power-saver / balanced / performance) and sets the power limit and fan mode through b70-powerd; `b70-power` (in `tools/b70-powerd/`) is the manual-override CLI |
 | `tools/xe-oc-build.sh` | Builds a patched `xe.ko` (0004 + 0005) for the running Ubuntu kernel from Ubuntu's source package |
 
 ### Base kernel

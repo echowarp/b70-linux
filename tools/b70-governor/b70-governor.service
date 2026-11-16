@@ -1,0 +1,12 @@
+[Unit]
+Description=B70 power governor (power profile -> b70-powerd)
+
+[Service]
+Type=simple
+# install: install -m755 b70-governor.py ~/.local/bin/ ; optional config in /etc/b70-governor.conf (see README)
+ExecStart=/usr/bin/python3 -I %h/.local/bin/b70-governor.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
