@@ -105,6 +105,28 @@ echo 2200 | sudo tee $D/oc/power_limit       # back to the 275 W default
   (4 streams)**, VRAM maximum 84 °C at both settings.
 - Decode on this card is mostly memory-bound, so the gain from power is modest; prefill gains more.
 
+## Fan: why it stays loud, and how to get it lower
+
+**The fan curve only updates when the GT is awake.** The firmware fan follows the temperatures pcode reports. Once
+the GT drops into `gt-c6` after a load, those readings stop updating: hwmon reads do not wake the GT, so the package
+and VRAM temperatures stay frozen at their last loaded values (seen: 68 / 80 °C reported while the card was really
+39 / 42 °C) and the fan holds ~2,390 rpm on an idle card. It is the input, not the curve: the same happens in firmware
+fan mode (`pwm1_enable 2`) and with a user table. Anything that wakes the GT (a tiny request, a forcewake) refreshes
+the readings and the fan settles within ~30 s. See IGCIT #1574 / drm/xe #9462.
+
+**Getting it lower (what worked, one ASRock B70 Creator):**
+- `tools/b70-fan-refresh/` polls on purpose, but only when it helps: every 10 s, if gt0 is in `gt-c6` and the
+  reported package temperature is >= 50 °C, it holds `debugfs dri/<pci>/forcewake_all` for ~2 ms. Result: idle fan
+  2,390 → 1,095 rpm within 30 s, readings back to the real temperatures. It stops waking the GT once the card reads
+  cool, so the GPU still reaches RC6 (a poller that wakes it unconditionally costs ~11 W at idle; see
+  `docs/monitoring.md`).
+- Gate on the **package** temperature only. A forcewake refreshes the package sensor but not VRAM; gating on VRAM kept
+  waking the GT every 10 s (17 wakes in 3 min) and made the fan swing ~600 ↔ 1,250 rpm.
+- `tools/b70-fan-smooth/` (needs Intel's fan-control series 168027) lowers and steadies it further: the stock curve
+  fed a 20 s average of the package temperature, ramping up ≤ 0.5 %/s and down ≤ 0.05 %/s. It writes a user table
+  flat below 80 °C and stock from 80 °C, so the firmware still ramps if the tool dies, and jumps to stock at ≥ 90 °C.
+- `tools/b70-powerd/` combines both with the power limit; run either it or the two fan tools, not both.
+
 ## Third-party work (links, not included)
 
 - Intel's xe fan-control series (Karthik Poosa): https://patchwork.freedesktop.org/series/168027/
