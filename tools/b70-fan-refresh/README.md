@@ -9,7 +9,8 @@ hwmon does not wake the GT. Any tiny GPU request woke it: within ~30 s the readi
 refreshed the package reading (67 -> 48 C, RC6 residency still 100 %), but VRAM stayed at a stale 72 C. With a VRAM
 gate that kept it waking every 10 s, and the fan swung ~600 <-> 1,250 rpm. The idle fan speed with the final
 pkg-only gate was not recorded separately. The 39 / 42 C and ~1,095 rpm above came from a real GPU request, not
-from this tool. Which sensor the firmware fan follows is not known, so measure the fan on your card.
+from this tool. Which sensor the firmware fan follows is not known. In daily use on our card the script reliably brings the fan back
+down after a run, where without it the fan often stays at high speed (observed; an rpm measurement is still to do).
 
 **Fix (userspace, no kernel patch).** Every `REFRESH_S` (10) seconds, if `tile0/gt0/gtidle/idle_status` is `gt-c6`
 and the reported **package** temperature is >= `PKG_C` (50) C, hold debugfs `dri/<pci>/forcewake_all` open for

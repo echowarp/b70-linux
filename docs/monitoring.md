@@ -73,7 +73,8 @@ a forcewake refreshes the package reading only.
 is at least 50 °C, hold the debugfs `dri/<pci>/forcewake_all` file open for ~2 ms (opening it takes a
 forcewake reference, closing it drops it). This refreshes the **package** reading only; a forcewake does not
 refresh the VRAM sensor (it stayed at a stale 72 °C in our test). In our one measurement the package reading went from 67 to 48 °C (RC6 still 100 %); the idle fan speed with the
-package-only gate alone was not recorded, and which sensor the firmware fan follows is not known.
+package-only gate alone was not recorded, and which sensor the firmware fan follows is not known. In daily use it reliably quiets the fan after a run, where
+without it the fan often stays at high speed (observed, not yet measured in rpm).
 
 ## Links
 
