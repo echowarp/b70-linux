@@ -40,13 +40,26 @@ Overnight this took the card from a flat 56-57 W to the ~46 W RC6 floor.
 - For reference, a Windows review measured a single B70 idling at 26 W, and users report Arc cards going
   from 30-40 W to 5-7 W once ASPM L1 is enabled. **ASPM is the larger lever** on platforms that allow it.
 
-## ASPM warning
+## Idle power and PCIe ASPM (the part we could not fix)
 
-Do **not** boot with `pcie_aspm.policy=powersupersave` (L1.1/L1.2 substates): the B70 then fails to come
-out of D3cold at boot (xe probe fails with -71). A PCI quirk disabling the L1 substates on the card's
-upstream switch port has been proposed. `pcie_aspm.policy=powersave` (L0s + L1) works. If other devices
-share the machine (for example a GPU on an external link), check that they tolerate ASPM before forcing it
-globally with `pcie_aspm=force`.
+With every poller gated, our B70 still idles at **~46 W** in RC6, against ~26 W in PCGH's Windows review and the
+5–7 W users report on Linux with ASPM L1. Intel documents **ASPM L1 as a requirement for Arc low-power idle**
+(https://www.intel.com/content/www/us/en/support/articles/000092564/graphics.html), and the rest of our floor is the
+package plus a PCIe link that never sleeps. What we found, and why we could not enable it:
+
+- **ASPM was off on the whole GPU path:** root port, the B70's internal switch (`e2ff`, L1 + L1 substates capable), its
+  downstream port and the GPU all showed `LnkCtl: ASPM Disabled`.
+- **The firmware would not hand ASPM to the OS:** the kernel logged "ACPI FADT declares the system doesn't support PCIe
+  ASPM ... using BIOS configuration". The `pcie_aspm` policy file reads `[default]` but has no effect without OS
+  control, and there are no per-device `link/l1_aspm` nodes. Our (Dell workstation) BIOS has no PCIe link power option.
+- **What's left needs a reboot and has risks:** `pcie_aspm=force pcie_aspm.policy=powersave` (L0s + L1) is the only
+  route on such a board. We did not adopt it: forcing ASPM applies to every link, including an external OCuLink link
+  to a second GPU that already needs a Gen2 cap to be stable.
+- **Never use `pcie_aspm.policy=powersupersave`** (L1.1/L1.2): the B70 then stays in D3cold at boot and xe fails to
+  probe (-71). A proposed PCI quirk disables the L1 substates on the `e2ff` upstream port; `powersave` (L0s + L1) is
+  reported to work.
+- On boards whose BIOS exposes "PCIe link state power management" / "Native ASPM", enable it there instead; that is the
+  route other B70 owners report working (e.g. https://blog.anantshri.info/experiments-with-intel-arc-pro-b70-on-debian-13/).
 
 ## The fan latch after load (IGCIT #1574)
 
