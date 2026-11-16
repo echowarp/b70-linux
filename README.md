@@ -22,11 +22,13 @@ clock. Treat the numbers as one board's results, not a specification.
 | `patches/0004-...` | drm/xe/hwmon: opt-in module param `xe.power_limit_unclamped=1` skips xe's extra clamp to the boot-default power limit (pcode still clamps to the card maximum) |
 | `patches/0005-...` | drm/xe: debugfs for the Battlemage pcode overclocking domains (`dri/<pci>/oc/{domains,power_limit,write,exit}`) |
 | `patches/0006-...` | **EXPERIMENTAL**: module param `xe.oc_mem_mbps` sets the GDDR rate at probe. Unstable on our board (GT0 forcewake hang right after any rate above stock); we run with it disabled |
+| `docs/efficiency.md` | Tokens per joule, speed, temperature and fan per power limit (160-330 W), card-only and estimated wall power |
+| `docs/priority-boost.md` | Full power for interactive / priority LLM traffic, tokens per joule for background traffic: request classes and the boost trigger |
 | `docs/monitoring.md` | Which telemetry readers keep the GT out of RC6, idle-power numbers, ASPM warning, the stale-temperature fan latch and a userspace workaround |
 | `tools/b70-fan-refresh/` | Script + systemd unit: userspace workaround for the stale-temperature fan latch (IGCIT #1574), no kernel patch |
 | `tools/b70-fan-smooth/` | Optional calmer fan curve (script + unit); needs Intel's xe fan-control series 168027 |
 | `tools/b70-powerd/` | Root daemon: power limit via `oc/power_limit`, VRAM guard, re-apply after reset, plus both fan functions |
-| `tools/b70-governor/` | User service: follows the desktop power plan (power-saver / balanced / performance) and sets the power limit and fan mode through b70-powerd; `b70-power` (in `tools/b70-powerd/`) is the manual-override CLI |
+| `tools/b70-governor/` | User service: follows the desktop power plan (power-saver / balanced / performance) and sets the power limit and fan mode through b70-powerd; boost triggers for interactive traffic plus an ASGI middleware that classifies LLM requests; `b70-power` (in `tools/b70-powerd/`) is the manual-override CLI |
 | `tools/xe-oc-build.sh` | Builds a patched `xe.ko` (0004 + 0005) for the running Ubuntu kernel from Ubuntu's source package |
 
 ### Base kernel
@@ -105,6 +107,24 @@ echo 2200 | sudo tee $D/oc/power_limit       # back to the 275 W default
 - 300 → 330 W (A/B under real serving load): **prefill +3-7 %, decode +2.8 % (1 stream) / +1.9 %
   (4 streams)**, VRAM maximum 84 °C at both settings.
 - Decode on this card is mostly memory-bound, so the gain from power is modest; prefill gains more.
+
+## Efficiency: tokens per joule
+
+Same board, Qwen3.8-27B EXL3 4.0 bpw on our engine, card power from hwmon `energy1` (details and the wall-power
+estimate in [docs/efficiency.md](docs/efficiency.md)):
+
+| Limit | Decode 4 streams tok/s | tok/J | Prefill tok/J |
+|---|---|---|---|
+| 190 W | 190 (79 %) | **1.003** | **10.89** |
+| 220 W | 212 (88 %) | 0.962 | 10.42 |
+| 275 W (stock) | 229 (95 %) | 0.838 | 9.36 |
+| 330 W | 242 (100 %) | 0.744 | 8.31 |
+
+- **190 W is the most efficient** on card power (+31-36 % tok/J vs 330 W at 76-80 % of the speed), and the card is
+  near silent there in continuous use (observed). At the wall **220 W** is within 1 % of it at 8-11 % more speed.
+- **300 → 330 W buys +2-3 %.** Full power pays off only while someone waits for tokens, so the governor runs the
+  profile's 190 W by default and boosts while a client holds a trigger:
+  [docs/priority-boost.md](docs/priority-boost.md).
 
 ## Fan: why it stays loud, and how to get it lower
 

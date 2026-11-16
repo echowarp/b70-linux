@@ -1,0 +1,4 @@
+# /etc/tmpfiles.d/b70-boost.conf: trigger directory for b70-governor boosts (one file per client id).
+# Sticky + world-writable like /tmp: any local user may boost, nobody can remove another client's trigger.
+# To limit who may boost, use a group instead, e.g.: d /run/b70-boost 1770 root b70boost -
+d /run/b70-boost 1777 root root -

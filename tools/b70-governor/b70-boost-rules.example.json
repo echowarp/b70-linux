@@ -1,0 +1,16 @@
+{
+  "default": "interactive",
+  "priority": {"high": "interactive", "normal": "interactive", "low": "background", "background": "background"},
+  "agents": {
+    "chat": "interactive",
+    "ide-assistant": "interactive",
+    "batch-*": "background",
+    "indexer": "background"
+  },
+  "hosts": {
+    "192.0.2.0/24": "interactive",
+    "198.51.100.0/24": "background",
+    "nightly-runner.example.lan": "background"
+  },
+  "trusted_proxies": ["127.0.0.0/8", "::1/128"]
+}
