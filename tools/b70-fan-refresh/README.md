@@ -5,6 +5,12 @@ loaded values. The firmware fan curve follows those stale readings, so the fan s
 was identical with the firmware curve (`pwm1_enable 2`) and a user table, so the input is wrong, not the curve. Reading
 hwmon does not wake the GT. Any tiny GPU request woke it: within ~30 s the readings fell to 39 / 42 C and the fan to ~1,095 rpm.
 
+**What the refresh alone was measured to do** (2026-11-07, after a 40 s load, no requests): the ~2 ms GT wakes
+refreshed the package reading (67 -> 48 C, RC6 residency still 100 %), but VRAM stayed at a stale 72 C. With a VRAM
+gate that kept it waking every 10 s, and the fan swung ~600 <-> 1,250 rpm. The idle fan speed with the final
+pkg-only gate was not recorded separately. The 39 / 42 C and ~1,095 rpm above came from a real GPU request, not
+from this tool. Which sensor the firmware fan follows is not known, so measure the fan on your card.
+
 **Fix (userspace, no kernel patch).** Every `REFRESH_S` (10) seconds, if `tile0/gt0/gtidle/idle_status` is `gt-c6`
 and the reported **package** temperature is >= `PKG_C` (50) C, hold debugfs `dri/<pci>/forcewake_all` open for
 `HOLD_MS` (2) ms. The GT wakes briefly and pcode refreshes the readings. Once the reading is low it does nothing.

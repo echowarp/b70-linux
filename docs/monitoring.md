@@ -72,8 +72,8 @@ a forcewake refreshes the package reading only.
 **Userspace workaround:** every 10 s, if gt0 `idle_status` is `gt-c6` and the reported package temperature
 is at least 50 °C, hold the debugfs `dri/<pci>/forcewake_all` file open for ~2 ms (opening it takes a
 forcewake reference, closing it drops it). This refreshes the **package** reading only; a forcewake does not
-refresh the VRAM sensor (it stayed at a stale 72 °C in our test), but the package reading is what drags the fan
-along. The cost is a 2 ms wake every 10 s, and only while the latch condition holds.
+refresh the VRAM sensor (it stayed at a stale 72 °C in our test). In our one measurement the package reading went from 67 to 48 °C (RC6 still 100 %); the idle fan speed with the
+package-only gate alone was not recorded, and which sensor the firmware fan follows is not known.
 
 ## Links
 
